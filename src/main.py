@@ -2,14 +2,12 @@ import os.path
 import sys
 import cv2
 from skimage import measure, draw
-from scipy import optimize, ndimage
-from matplotlib.pyplot import plot, imshow, show
+from scipy import optimize
 import imutils
 import numpy as np
 from numpy import where, cos, sin, count_nonzero
 import pandas as pd
-from distances import getSlopeIntercept, lineAt, vertDistFingers, horDistFingers
-import matplotlib.pyplot as plt
+from distances import getSlopeIntercept, vertDistFingers, horDistFingers
 
 print("OpenCV Version:", cv2.__version__)
 
@@ -58,41 +56,54 @@ def getCoin(img_segmented, index, properties):
     coin = where(img_segmented == index, np.uint8(255), np.uint8(0))
     return coin, diameter_coin
 
+def extract_properties(properties, hand_index):
+    """Extract relevant properties for the given hand_index."""
+    properties_row = properties.loc[properties["label"] == hand_index]
+    centroid_y = properties_row['centroid-0'].item()
+    centroid_x = properties_row['centroid-1'].item()
+    orientation = properties_row['orientation'].item()
+    minor_axis_length = properties_row['minor_axis_length'].item()
+    major_axis_length = properties_row['major_axis_length'].item()
+
+    return centroid_y, centroid_x, orientation, minor_axis_length, major_axis_length
+
+def initial_circle_params(centroid_x, centroid_y, major_axis_length):
+    """Initial circle parameters based on the major axis length."""
+    return centroid_x, centroid_y, major_axis_length / 8.0
+
+def calculate_allowed_margin(shape):
+    """Calculate the allowed margin for fitting the circle."""
+    return [dimension / 30 for dimension in shape]
+
+def loss_function(params, hand_segment, centroid_y, centroid_x, allowed_margin):
+    """Custom loss function to optimize circle fitting."""
+    x, y, r = params
+    coords = draw.disk((y, x), r, shape=hand_segment.shape)
+    template = np.zeros_like(hand_segment)
+    template[coords] = 255
+
+    # Check if circle is inside the hand segment
+    if np.count_nonzero(cv2.subtract(template, hand_segment)) > 0:
+        return float('inf')
+
+    # Check if circle is close to centroid
+    if abs(y - centroid_y) > allowed_margin[0] or abs(x - centroid_x) > allowed_margin[1]:
+        return float('inf')
+
+    return -np.sum(template == hand_segment)
+
 def fitCircle(img_segmented, properties, hand_index, hand_segment):
-    y0_centre = properties.loc[properties["label"] == hand_index]['centroid-0'].item()
-    x0_centre = properties.loc[properties["label"] == hand_index]['centroid-1'].item()
-    radius0 = properties.loc[properties["label"] == hand_index].major_axis_length / 8.0
-
-    orientation = properties.loc[properties['label'] == hand_index]['orientation'].item()
-    minor_axis_length = properties.loc[properties['label'] == hand_index]['minor_axis_length'].item()
-    major_axis_length = properties.loc[properties['label'] == hand_index]['major_axis_length'].item()
-    x1 = x0_centre + cos(orientation) * 0.5 * minor_axis_length
-    y1 = y0_centre - sin(orientation) * 0.5 * minor_axis_length
-    x2 = x0_centre - sin(orientation) * 0.5 * major_axis_length
-    y2 = y0_centre - cos(orientation) * 0.5 * major_axis_length
-    allowed_margin = [axis / 30 for axis in hand_segment.shape]
-
-    def _lossFunction(params):
-        isInside = 1
-        x, y, r = params
-        coords = draw.disk((y, x), r, shape=hand_segment.shape)
-        template = np.zeros_like(hand_segment)
-        template[coords] = 255
-
-        # Check if circle exceeds hand area
-        if count_nonzero(cv2.subtract(template, hand_segment)) > 0:
-            isInside = 0
-
-        # Check if circle is close to centroid
-        elif abs(y - y0_centre) > allowed_margin[0] or abs(x - x0_centre) > allowed_margin[1]:
-            isInside = 0
-
-        return -np.sum(template == hand_segment) * isInside
-
-    x_centre, y_centre, radius = optimize.fmin(_lossFunction, (x0_centre, y0_centre, radius0))
-    diameter = 2 * radius
-
-    return diameter
+    """Fit a circle to the segmented hand image and return its diameter."""
+    # Extract properties and initial parameters
+    y0_centre, x0_centre, orientation, minor_axis_length, major_axis_length = extract_properties(properties, hand_index)
+    x_centre, y_centre, radius = initial_circle_params(x0_centre, y0_centre, major_axis_length)
+    
+    # Define margin and optimize
+    allowed_margin = calculate_allowed_margin(hand_segment.shape)
+    optimized_params = optimize.fmin(loss_function, (x_centre, y_centre, radius), args=(hand_segment, y0_centre, x0_centre, allowed_margin), disp=True)
+    x_opt, y_opt, radius_opt = optimized_params
+    
+    return 2 * radius_opt
 
 def fitConvexPolygon(hand_segment):
     cnts = cv2.findContours(hand_segment, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -295,15 +306,15 @@ def main():
         print("4) Horizontal distance between index and pinky: %.2f cm" % distance_2_5)
         print("5) Horizontal distance between thumb and pinky: %.2f cm" % distance_1_5)
         
-        data_out = data_out.append({'file name': file,
-                                'hand': side,
-                                'width': "%.2f" %width,
-                                'length': "%.2f" %length,
-                                'distance_1_2': "%.2f" %distance_1_2,
-                                'distance_1_3': "%.2f" %distance_1_3,
-                                'distance_2_3': "%.2f" %distance_2_3,
-                                'distance_2_5': "%.2f" %distance_2_5,
-                                'distance_1_5': "%.2f" %distance_1_5}, ignore_index=True)
+        data_out = pd.concat([data_out, pd.DataFrame({'file name': [file],
+                                'hand': [side],
+                                'width': ["%.2f" %width],
+                                'length': ["%.2f" %length],
+                                'distance_1_2': ["%.2f" %distance_1_2],
+                                'distance_1_3': ["%.2f" %distance_1_3],
+                                'distance_2_3': ["%.2f" %distance_2_3],
+                                'distance_2_5': ["%.2f" %distance_2_5],
+                                'distance_1_5': ["%.2f" %distance_1_5]})], ignore_index=True)
         
     data_out.to_csv('measurements.csv', header=True)
 

@@ -3,6 +3,16 @@
 
 *Date: 29-05-2021*
 
+# Setup
+```bash
+pip install -r requirements.txt
+```
+# Usage
+```bash
+cd handscans/
+python3.9 ../src/main.py handscans.csv
+```
+
 ----
 
 # Introduction 
